@@ -8,6 +8,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/models.dart';
 
 /// Production Firebase Service for BossArman MotoHub & MotoHub Rider.
@@ -91,6 +92,10 @@ class FirebaseService {
   String? get fcmToken => _cachedFcmToken;
   String? get currentAuthUid => _auth?.currentUser?.uid;
   final Map<String, ({UserRole role, BranchId branch})> _activeBoundUsers = {};
+
+  /// Key under which active user bindings are persisted so a cold-started app
+  /// can re-sync its FCM token before login completes.
+  static const String _kPersistedBindingsKey = 'fcm_active_bindings';
 
   /// Safe to call many times / concurrently; only one init ever runs.
   Future<void> initialize() {
@@ -192,6 +197,16 @@ class FirebaseService {
           settings.authorizationStatus == AuthorizationStatus.provisional) {
         _cachedFcmToken = await _messaging!.getToken();
         debugPrint('[FirebaseService] FCM Token: $_cachedFcmToken');
+      }
+
+      // Restore any previously-bound users and re-merge the current token.
+      // When the app is killed/swiped-away, Play Services can rotate the FCM
+      // token; without this re-sync the server keeps sending to a dead token
+      // and pushes are lost while the app is closed.
+      await restoreActiveBindings();
+      final token = _cachedFcmToken;
+      if (token != null && token.isNotEmpty) {
+        await updateAllActiveBindingsWithToken(token);
       }
 
       _messaging!.onTokenRefresh.listen((newToken) async {
@@ -1016,6 +1031,7 @@ class FirebaseService {
         }, SetOptions(merge: true));
       }
       debugPrint('[FirebaseService] Updated user binding for $appUserId (token: $token)');
+      unawaited(persistActiveBindings());
     } catch (e) {
       debugPrint('[FirebaseService] updateUserBinding error: $e');
     }
@@ -1034,8 +1050,62 @@ class FirebaseService {
         }, SetOptions(merge: true));
         debugPrint('[FirebaseService] Removed FCM token for user $appUserId');
       }
+      unawaited(persistActiveBindings());
     } catch (e) {
       debugPrint('[FirebaseService] unbindUser error: $e');
+    }
+  }
+
+  /// Re-merges a fresh FCM token into every active user binding.
+  /// Called on cold start and token refresh so that devices whose app was
+  /// killed (and whose token subsequently rotated) keep receiving pushes.
+  Future<void> updateAllActiveBindingsWithToken(String token) async {
+    if (!_isInitialized || _firestore == null) return;
+    _cachedFcmToken = token;
+    for (final entry in _activeBoundUsers.entries.toList()) {
+      await updateUserBinding(
+        appUserId: entry.key,
+        role: entry.value.role,
+        branch: entry.value.branch,
+      );
+    }
+  }
+
+  /// Restores the active bindings saved by [persistActiveBindings] so a
+  /// cold-started app can re-sync its (possibly rotated) FCM token even
+  /// before the user completes login.
+  Future<void> restoreActiveBindings() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getStringList(_kPersistedBindingsKey);
+      if (raw == null || raw.isEmpty) return;
+      for (final entry in raw) {
+        final parts = entry.split('|');
+        if (parts.length != 3) continue;
+        final role = UserRole.values.firstWhere(
+          (r) => r.name == parts[1],
+          orElse: () => UserRole.customer,
+        );
+        final branch = BranchId.values.firstWhere(
+          (b) => b.name == parts[2],
+          orElse: () => BranchId.patimbao,
+        );
+        _activeBoundUsers[parts[0]] = (role: role, branch: branch);
+      }
+    } catch (e) {
+      debugPrint('[FirebaseService] restoreActiveBindings notice: $e');
+    }
+  }
+
+  Future<void> persistActiveBindings() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final entries = _activeBoundUsers.entries
+          .map((e) => '${e.key}|${e.value.role.name}|${e.value.branch.name}')
+          .toList();
+      await prefs.setStringList(_kPersistedBindingsKey, entries);
+    } catch (e) {
+      debugPrint('[FirebaseService] persistActiveBindings notice: $e');
     }
   }
 

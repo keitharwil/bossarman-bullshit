@@ -3,6 +3,7 @@ package com.bossarman.motohub.boss_arman_motohub
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.util.Log
 
 class BootReceiver : BroadcastReceiver() {
@@ -22,7 +23,11 @@ class BootReceiver : BroadcastReceiver() {
                 val serviceIntent = Intent(context, MotoHubNotificationService::class.java).apply {
                     putExtra("isForeground", false)
                 }
-                context.startService(serviceIntent)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(serviceIntent)
+                } else {
+                    context.startService(serviceIntent)
+                }
                 Log.d(TAG, "Started MotoHubNotificationService successfully from action: $action")
             } catch (e: Exception) {
                 Log.w(TAG, "Could not start MotoHubNotificationService on $action: ${e.message}")

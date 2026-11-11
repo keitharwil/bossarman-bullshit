@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -5,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../models/models.dart';
+import 'firebase_service.dart';
 
 /// Top-level background message handler for FCM.
 /// Must be annotated with `@pragma('vm:entry-point')` so the Flutter engine
@@ -15,10 +17,14 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
     await Firebase.initializeApp();
   } catch (_) {}
   debugPrint('[FCM Background] Message received: ${message.messageId} | ${message.notification?.title}');
-  // Note: On Android, messages with a `notification` payload automatically trigger a system notification
-  // in the notification shade if the channel is properly registered. If only a `data` payload is sent,
-  // we display it via flutter_local_notifications.
-  if (message.notification == null && message.data.isNotEmpty) {
+  // Display the message via flutter_local_notifications in this background
+  // isolate. This is required for data-only payloads (and payloads whose
+  // notification title/body are empty), which produce NO automatic system
+  // tray notification when the app is in background/terminated state.
+  final hasVisibleNotification = message.notification != null &&
+      ((message.notification?.title ?? '').isNotEmpty ||
+          (message.notification?.body ?? '').isNotEmpty);
+  if (!hasVisibleNotification && message.data.isNotEmpty) {
     await NotificationService.showBackgroundDataNotification(message);
   }
 }
@@ -114,13 +120,50 @@ class NotificationService {
       final initialMessage = await FirebaseMessaging.instance.getInitialMessage();
       if (initialMessage != null) {
         debugPrint('[NotificationService] App launched from killed state by notification: ${initialMessage.data}');
-        // Delay slightly to allow the initial route to mount
-        Future.delayed(const Duration(milliseconds: 600), () {
-          NotificationRouter.handleRemoteMessage(initialMessage);
-        });
+        _scheduleColdStartRouting(initialMessage.data);
       }
     } catch (e) {
       debugPrint('[NotificationService] Cold start message check warning: $e');
+    }
+
+    // 6. Re-register the background/terminated-state handler every app launch.
+    // FCM stores this registration in native prefs; re-registering keeps it
+    // valid after hot restarts, reinstalls and app updates.
+    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+
+    // 7. Re-sync the FCM token on every cold start. When the app was killed
+    // (swiped away), Google Play services may rotate the token; without this,
+    // user_bindings/{user}.fcmTokens keeps a stale token and pushes silently
+    // fail while the app is closed.
+    unawaited(resyncFcmToken());
+  }
+
+  /// Waits (with retries) until the navigator context is mounted, then routes
+  /// a cold-start notification payload to its destination screen.
+  static void _scheduleColdStartRouting(Map<String, dynamic> payload) {
+    var attempts = 0;
+    void tryRoute() {
+      attempts++;
+      if (navigatorKey.currentContext != null) {
+        NotificationRouter.handlePayload(payload);
+        return;
+      }
+      if (attempts >= 10) return; // give up after ~6s
+      Future.delayed(const Duration(milliseconds: 600), tryRoute);
+    }
+    Future.delayed(const Duration(milliseconds: 600), tryRoute);
+  }
+
+  /// Fetches the current FCM token and merges it into all active user bindings
+  /// so devices that were killed still receive push notifications.
+  static Future<void> resyncFcmToken() async {
+    try {
+      final token = await FirebaseMessaging.instance.getToken();
+      if (token == null || token.isEmpty) return;
+      debugPrint('[NotificationService] Resyncing FCM token to user bindings');
+      await FirebaseService.instance.updateAllActiveBindingsWithToken(token);
+    } catch (e) {
+      debugPrint('[NotificationService] FCM token resync warning: $e');
     }
   }
 
@@ -298,6 +341,12 @@ class NotificationService {
       notificationDetails: details,
       payload: payloadString,
     );
+    // Force the pending notification/payload to be written to disk immediately.
+    // Without this, the OS may kill the short-lived background isolate before
+    // it flushes, and the notification never appears (or appears with no payload).
+    try {
+      await localNotifications.flushNotificationsOnDatabases();
+    } catch (_) {}
   }
 }
 
