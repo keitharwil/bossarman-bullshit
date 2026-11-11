@@ -220,7 +220,15 @@ exports.deliverPushNotification = onDocumentCreated(
                 sound: "default",
                 badge: 1,
                 contentAvailable: true,
+                // Deliver immediately when the app is in background/terminated
+                // state instead of letting iOS defer it to a background fetch.
+                "content-available": 1,
               },
+            },
+          },
+          webpush: {
+            headers: {
+              Urgency: "high",
             },
           },
         };

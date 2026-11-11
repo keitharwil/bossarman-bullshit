@@ -50,7 +50,14 @@ class MainActivity : FlutterActivity() {
             val serviceIntent = Intent(applicationContext, MotoHubNotificationService::class.java).apply {
                 putExtra("isForeground", isForeground)
             }
-            startService(serviceIntent)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // The service self-promotes to a foreground service; using
+                // startForegroundService avoids "not allowed to start service
+                // Intent ... while app invisible" / background-start crashes.
+                applicationContext.startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
         } catch (e: Exception) {
             Log.w("MainActivity", "Could not update MotoHubNotificationService: ${e.message}")
         }
@@ -71,6 +78,7 @@ class MotoHubNotificationService : Service() {
         private const val CHANNEL_NAME = "High Importance Notifications"
         private const val PREFS_NAME = "MotoHubBgNotifPrefs"
         private const val PREFS_SEEN_KEY = "motohub_bg_notified_ids"
+        private const val KEEPALIVE_NOTIFICATION_ID = 987654
     }
 
     @Volatile
@@ -90,8 +98,44 @@ class MotoHubNotificationService : Service() {
         if (intent != null && intent.hasExtra("isForeground")) {
             isMainAppForeground = intent.getBooleanExtra("isForeground", false)
         }
+        // MUST be called within ~5s of a startForegroundService() call or the
+        // system throws ANR/crash on Android 8+. This also keeps the Firestore
+        // listener alive when the app process is cached after being swiped away.
+        promoteToForeground()
         ensureFirebaseAndListen()
         return START_STICKY
+    }
+
+    private fun promoteToForeground() {
+        try {
+            createNotificationChannel()
+            val launchIntent = Intent(applicationContext, MainActivity::class.java)
+            val piFlags = PendingIntent.FLAG_UPDATE_CURRENT or
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+            val pendingIntent = PendingIntent.getActivity(
+                applicationContext, 1000, launchIntent, piFlags
+            )
+            val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle(applicationContext.applicationInfo.loadLabel(packageManager))
+                .setContentText("Listening for order & shop updates")
+                .setOngoing(true)
+                .setSilent()
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .setContentIntent(pendingIntent)
+                .build()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    KEEPALIVE_NOTIFICATION_ID, notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+                )
+            } else {
+                startForeground(KEEPALIVE_NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "promoteToForeground notice: ${e.message}")
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
