@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Boss Arman MotoHub (Internal POS/ERP - Chrome)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main_internal.dart",
+      "deviceId": "chrome"
+    },
+    {
+      "name": "Boss Arman Rider (Customer App - Chrome)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main_customer.dart",
+      "deviceId": "chrome"
+    },
+    {
+      "name": "Boss Arman MotoHub (Internal POS/ERP - Default Device)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main_internal.dart"
+    },
+    {
+      "name": "Boss Arman Rider (Customer App - Default Device)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main_customer.dart"
+    }
+  ]
+}

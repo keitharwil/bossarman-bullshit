@@ -1,0 +1,15 @@
+{
+  "name": "boss-arman-motohub-functions",
+  "description": "Cloud Functions for Boss Arman MotoHub FCM Push Notification Delivery",
+  "version": "1.0.0",
+  "main": "index.js",
+  "engines": {
+    "node": "20"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0",
+    "firebase-functions": "^6.3.2"
+  },
+  "private": true
+}
+

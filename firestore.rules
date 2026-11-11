@@ -1,0 +1,252 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// This security rules file assumes the following data structures:
+//
+// Collection: inventory
+// Document ID: {id}
+// Fields:
+//   - id: string (required) - Item ID
+//   - sku: string (required) - Stock keeping unit
+//   - name: string (required) - Item name
+//   - price: number (required, >= 0) - Unit price
+//   - stockPatimbao: number (required, >= 0) - Stock count at Patimbao branch
+//   - stockPedroGuevara: number (required, >= 0) - Stock count at Pedro Guevara branch
+//
+// Collection: staff_accounts
+// Document ID: {id}
+// Fields:
+//   - id, username, fullName, role, branch, pinHash, etc.
+//
+// Collection: customer_accounts
+// Document ID: {id}
+// Fields:
+//   - id, phone, name, vehicles, loyaltyPoints, etc.
+//
+// Collection: job_orders
+// Document ID: {id}
+// Fields:
+//   - id, customerId, customerName, vehicle, services, status, branch, totalAmount, etc.
+//
+// Collection: click_and_collect
+// Document ID: {id}
+// Fields:
+//   - id, orderId, customerId, items, status, pickupBranch, etc.
+//
+// Collection: stock_transfers
+// Document ID: {id}
+// Fields:
+//   - id, fromBranch, toBranch, items, status, requestedAt, etc.
+//
+// Collection: transactions
+// Document ID: {id}
+// Fields:
+//   - id, date, items, total, paymentMethod, branch, cashierId, etc.
+//   - Note: Immutable sales history; delete is strictly forbidden.
+//
+// Collection: customer_notifications
+// Document ID: {id}
+// Fields:
+//   - jobId, title, body, branch, fcmToken, createdAt, isRead
+//
+// Collection: users
+// Document ID: {uid} (Firebase Auth UID)
+// Fields:
+//   - role, username, email, displayName, etc.
+//
+// Collection: user_bindings
+// Document ID: {appUserId} (Application user ID or username)
+// Fields:
+//   - appUserId: string (required)
+//   - role: string (e.g. 'admin', 'mechanic', 'cashier', 'customer')
+//   - branch: string (e.g. 'patimbao', 'pedroGuevara')
+//   - authUids: list of strings (Firebase Auth UIDs bound to this device/account)
+//   - fcmTokens: list of strings (FCM push notification registration tokens)
+//   - updatedAt: timestamp (server timestamp of last device sync)
+//
+// Collection: notifications
+// Document ID: {notifId}
+// Fields:
+//   - id: string (required)
+//   - title: string (required)
+//   - message: string (required)
+//   - category: string ('transfer', 'low_stock', 'job_order', 'booking', 'reservation', 'drawer', 'chat')
+//   - branch: string
+//   - isRead: number or bool
+//   - createdAt: string or timestamp
+//   - targetRole: string (optional)
+//   - targetUserId: string (optional)
+//   - payload: string or map (optional)
+//
+// Collection: settings
+// Document ID: {id} (e.g. 'gcash_config')
+// Fields:
+//   - Stores operational branch configurations and GCash payment settings:
+//     account names, mobile numbers, QR image URLs, and branch payment preferences.
+//
+// Collection: chats
+// Document ID: {threadId}
+// Fields:
+//   - id: string (required)
+//   - participantIds: list of strings (app-level IDs: e.g. [customerId, adminId])
+//   - authUids: list of strings (Firebase Auth UIDs for participating devices)
+//   - roles: list of strings (e.g. ['customer', 'admin'])
+//   - jobOrderId: string (optional)
+//   - lastMessage: string (optional)
+//   - lastMessageAt: string or timestamp (optional)
+//   - unreadCounts: map of string to int
+//   - participantNames: map of string to string (optional)
+//   - createdAt: string or timestamp
+//
+// Subcollection: chats/{threadId}/messages
+// Document ID: {messageId}
+// Fields:
+//   - id: string (required)
+//   - threadId: string (required)
+//   - senderId: string (required)
+//   - senderRole: string
+//   - text: string (optional)
+//   - imageUrl: string (optional)
+//   - createdAt: string or timestamp
+//   - readBy: list of strings
+// ===============================================================
+
+// ===============================================================
+// AUTHENTICATION & IDENTITY ARCHITECTURE NOTE:
+// ---------------------------------------------------------------
+// 1. ANONYMOUS AUTH AT THE TRANSPORT LAYER:
+//    The app initializes Firebase Anonymous Authentication (request.auth != null)
+//    on startup so that every client device possesses a valid Firebase Auth UID.
+//    This separates genuine app clients from unauthenticated public traffic.
+//
+// 2. APP-LEVEL IDENTITIES & user_bindings:
+//    Application users (Admins, Cashiers, Mechanics, Customers) authenticate
+//    locally with app usernames and credentials. Because Firebase Anonymous
+//    Auth yields device-level UIDs rather than app user IDs, the app syncs
+//    each device's Firebase Auth UID (and FCM push token) to Firestore under
+//    `user_bindings/{appUserId}`:
+//      - `authUids`: list of Firebase Auth UIDs associated with this user
+//      - `fcmTokens`: list of FCM device tokens for push notifications
+//      - `role`, `branch`, `updatedAt`
+// 3. CHATS & MESSAGES:
+//    For peer-to-peer and customer support communications in `chats/{threadId}`
+//    and subcollection `messages`:
+//    - Signed-in app clients (authenticated via Firebase Anonymous Auth on app launch)
+//      can read and write threads and messages.
+//    - This ensures reliable real-time messaging even when ephemeral device tokens
+//      are used or when threads and first messages are created in the same batch.
+//
+// 4. FUTURE PER-ROLE MIGRATION:
+//    When migrating app logins to Firebase Auth (e.g. Email/Password or Custom
+//    Claims), `request.auth.uid` will map directly to the authenticated user's
+//    UID, and the commented `isAdmin()` / `isStaff()` helpers can be enabled.
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Common authentication helper
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // --- Future per-role helpers (enable after migrating to Firebase Auth) ---
+    // function role() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role; }
+    // function isAdmin() { return signedIn() && role() == 'admin'; }
+    // function isStaff() { return signedIn() && role() in ['admin','cashier','mechanic']; }
+
+    // -------------------------------------------------------------
+    // INVENTORY
+    // -------------------------------------------------------------
+    match /inventory/{id} {
+      allow read: if signedIn();
+      allow create, update: if signedIn()
+        && request.resource.data.keys().hasAll(['id','sku','name','price'])
+        && request.resource.data.price is number && request.resource.data.price >= 0
+        && request.resource.data.stockPatimbao is number && request.resource.data.stockPatimbao >= 0
+        && request.resource.data.stockPedroGuevara is number && request.resource.data.stockPedroGuevara >= 0;
+      allow delete: if signedIn();   // -> isAdmin() after migration
+    }
+
+    // -------------------------------------------------------------
+    // STAFF & CUSTOMER ACCOUNTS
+    // -------------------------------------------------------------
+    match /staff_accounts/{id} {
+      allow read, write: if signedIn();   // -> isAdmin() after migration
+    }
+
+    match /customer_accounts/{id} {
+      allow read, write: if signedIn();
+    }
+
+    // -------------------------------------------------------------
+    // OPERATIONS & SALES TRANSACTIONS
+    // -------------------------------------------------------------
+    match /job_orders/{id}        { allow read, write: if signedIn(); }
+    match /click_and_collect/{id} { allow read, write: if signedIn(); }
+    match /stock_transfers/{id}   { allow read, write: if signedIn(); }
+    match /transactions/{id} {
+      allow read, create, update: if signedIn();
+      allow delete: if false;             // sales records are never deleted
+    }
+
+    // -------------------------------------------------------------
+    // CUSTOMER NOTIFICATIONS (LEGACY / DIRECT)
+    // -------------------------------------------------------------
+    match /customer_notifications/{id} { allow read, write: if signedIn(); }
+
+    // -------------------------------------------------------------
+    // USERS (AUTHENTICATED USER PROFILES)
+    // -------------------------------------------------------------
+    match /users/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+
+    // -------------------------------------------------------------
+    // USER BINDINGS (FCM TOKENS & AUTH UID ASSOCIATIONS)
+    // -------------------------------------------------------------
+    // Records appUserId -> authUids, fcmTokens, role, branch, updatedAt
+    match /user_bindings/{appUserId} {
+      allow read, write: if signedIn();
+    }
+
+    // -------------------------------------------------------------
+    // NOTIFICATIONS (CROSS-DEVICE IN-APP & PUSH NOTIFICATIONS)
+    // -------------------------------------------------------------
+    match /notifications/{notifId} {
+      allow read, create, update: if signedIn();
+      allow delete: if signedIn();        // Allows dismissed notifications cleanup
+    }
+
+    // -------------------------------------------------------------
+    // SETTINGS (BRANCH CONFIG & GCASH PAYMENT SETTINGS)
+    // -------------------------------------------------------------
+    // Stores branch operational configurations and GCash payment settings
+    // (e.g. settings/gcash_config: account names, numbers, QR image URLs).
+    match /settings/{id} {
+      allow read, write: if signedIn();
+    }
+
+    // -------------------------------------------------------------
+    // CHATS & MESSAGES
+    // -------------------------------------------------------------
+    // Threads and messages between customers and staff.
+    // Device-level anonymous authentication allows signed-in app clients to read and write.
+    match /chats/{threadId} {
+      allow read, write: if signedIn();
+
+      // Subcollection: messages in thread
+      match /messages/{messageId} {
+        allow read, write: if signedIn();
+      }
+    }
+
+    // -------------------------------------------------------------
+    // DEFAULT DENY
+    // -------------------------------------------------------------
+    match /{document=**} { allow read, write: if false; }
+  }
+}

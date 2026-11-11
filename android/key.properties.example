@@ -1,0 +1,8 @@
+# Copy to android/key.properties (NOT committed to git) and fill in.
+# Create the keystore once:
+#   keytool -genkey -v -keystore ~/motohub-release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias motohub
+# BACK UP the .jks and passwords - if lost you can never update the app on Play.
+storePassword=YOUR_STORE_PASSWORD
+keyPassword=YOUR_KEY_PASSWORD
+keyAlias=motohub
+storeFile=/absolute/path/to/motohub-release.jks
